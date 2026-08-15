@@ -2,19 +2,13 @@ from uuid import UUID
 
 from pydantic import BaseModel
 from pydantic import ConfigDict
+
 from app.enums.user_role import UserRole
 
 
-class UserProfileCreate(BaseModel):
-
-    full_name: str
-    phone: str | None = None
-    avatar_url: str | None = None
-
-
 class UserProfileUpdate(BaseModel):
-
     full_name: str | None = None
+    username: str | None = None
     phone: str | None = None
     avatar_url: str | None = None
     role: UserRole | None = None
@@ -22,9 +16,10 @@ class UserProfileUpdate(BaseModel):
 
 
 class UserProfileResponse(BaseModel):
-
     id: UUID
+    email: str | None
     full_name: str
+    username: str | None
     phone: str | None
     avatar_url: str | None
     role: UserRole

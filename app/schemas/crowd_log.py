@@ -6,7 +6,7 @@ from app.enums.crowd_level import CrowdLevel
 class CrowdLogCreate(BaseModel):
     station_id: int
     current_count: int
-    crowd_level: CrowdLevel
+    crowd_level: CrowdLevel | None = None
 
 
 class CrowdLogResponse(BaseModel):
