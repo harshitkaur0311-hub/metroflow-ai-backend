@@ -55,6 +55,12 @@ class Station(TimestampMixin, Base):
         default=True
     )
 
+    # Rated passenger capacity, used to derive crowd density / congestion
+    # ratios in the Crowd Monitoring Module.
+    capacity: Mapped[int] = mapped_column(
+        default=5000
+    )
+
     metro_lines = relationship(
         "LineStation",
         back_populates="station"

@@ -5,6 +5,8 @@ from sqlalchemy import Enum
 from sqlalchemy import ForeignKey
 from sqlalchemy import Float
 
+from sqlalchemy.dialects.postgresql import UUID
+
 from sqlalchemy.orm import Mapped
 from sqlalchemy.orm import mapped_column
 from sqlalchemy.orm import relationship
@@ -24,6 +26,7 @@ class Journey(TimestampMixin, Base):
     )
 
     user_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=True),
         ForeignKey("user_profiles.id"),
         nullable=False
     )

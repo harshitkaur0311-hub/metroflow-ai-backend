@@ -9,6 +9,7 @@ class StationCreate(BaseModel):
     latitude: float
     longitude: float
     is_interchange: bool = False
+    capacity: int = 5000
 
 
 class StationUpdate(BaseModel):
@@ -18,6 +19,7 @@ class StationUpdate(BaseModel):
     longitude: float | None = None
     is_interchange: bool | None = None
     is_active: bool | None = None
+    capacity: int | None = None
 
 
 class StationResponse(BaseModel):
@@ -29,6 +31,7 @@ class StationResponse(BaseModel):
     longitude: float
     is_interchange: bool
     is_active: bool
+    capacity: int
     model_config = ConfigDict(
         from_attributes=True
     )

@@ -6,7 +6,12 @@ from sqlalchemy import DateTime
 from sqlalchemy.orm import Mapped
 from sqlalchemy.orm import mapped_column
 
-from app.database.database import Base
+from app.database.base import Base
+
+# NOTE: This model is legacy/experimental and is not currently registered in
+# app/models/__init__.py. Route-between-stations concepts are instead
+# modelled via MetroLine + LineStation (ordered stops) and Journey
+# (passenger source/destination). Kept here, fixed, for future use.
 
 
 class Route(Base):

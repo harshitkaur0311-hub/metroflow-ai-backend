@@ -1,4 +1,5 @@
 from datetime import datetime
+from uuid import UUID as UUIDType
 
 from pydantic import BaseModel
 from pydantic import ConfigDict
@@ -21,7 +22,7 @@ class JourneyUpdate(BaseModel):
 
 class JourneyResponse(BaseModel):
     id: int
-    user_id: str
+    user_id: UUIDType
     source_station_id: int
     destination_station_id: int
     checkin_time: datetime
@@ -31,3 +32,14 @@ class JourneyResponse(BaseModel):
     model_config = ConfigDict(
         from_attributes=True
     )
+
+
+# --- Check-in / Check-out request bodies ---
+
+class CheckInRequest(BaseModel):
+    source_station_id: int
+    destination_station_id: int
+
+
+class CheckOutRequest(BaseModel):
+    journey_id: int

@@ -1,5 +1,4 @@
 from app.schemas.user_profile import (
-    UserProfileCreate,
     UserProfileUpdate,
     UserProfileResponse,
 )
