@@ -9,4 +9,4 @@ from app.models.train_location import TrainLocation
 from app.models.crowd_log import CrowdLog
 from app.models.prediction import Prediction
 from app.models.alert import Alert
-from app.models.ai_model import AIModel
+from app.models.ai_model import AIModelX

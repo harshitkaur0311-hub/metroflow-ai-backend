@@ -1,0 +1,30 @@
+from datetime import datetime
+
+from fastapi import APIRouter
+from sqlalchemy import text
+
+from app.core.config import settings
+from app.database.database import engine
+
+router = APIRouter(
+    prefix="/health",
+    tags=["Health"]
+)
+
+
+@router.get("/")
+def health_check():
+    db_status = "ok"
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+    except Exception as exc:
+        db_status = f"error: {exc}"
+
+    return {
+        "status": "ok" if db_status == "ok" else "degraded",
+        "app_name": settings.APP_NAME,
+        "app_version": settings.APP_VERSION,
+        "database": db_status,
+        "timestamp": datetime.utcnow(),
+    }
