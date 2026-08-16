@@ -1,7 +1,6 @@
 from app.database.base import Base
 from app.database.database import engine
 
-# Import all models
 from app.models import *
 
 
