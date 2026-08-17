@@ -1,3 +1,5 @@
+"""Passenger exit (check-out) - closes the journey, computes fare,
+updates crowd counts at source/destination."""
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
@@ -18,7 +20,7 @@ def check_out(
     payload: CheckOutRequest,
     db: Session = Depends(get_db),
     current_user: UserProfile = Depends(get_current_user),
-)
+):
     return journey_service.check_out(
         db,
         user_id=str(current_user.id),

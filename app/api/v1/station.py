@@ -1,3 +1,7 @@
+"""Milestone 1 - Station master data (metro rail systems, smart city
+transportation setup). Backs the Crowd Monitoring & Scheduling modules,
+which reference stations by id.
+"""
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
@@ -50,4 +54,3 @@ def delete_station(
     current_user: UserProfile = Depends(require_roles(UserRole.ADMIN)),
 ):
     station_service.delete_station(db, station_id)
-    
