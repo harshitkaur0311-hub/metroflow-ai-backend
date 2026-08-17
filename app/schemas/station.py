@@ -32,6 +32,13 @@ class StationResponse(BaseModel):
     is_interchange: bool
     is_active: bool
     capacity: int
+    # Real line name/color/physical-sequence, resolved from the
+    # metro_lines/line_stations join in station_service.list_stations -
+    # not columns on Station itself. None if a station has no line
+    # assigned yet.
+    line_name: str | None = None
+    line_color: str | None = None
+    station_order: int | None = None
     model_config = ConfigDict(
         from_attributes=True
     )
