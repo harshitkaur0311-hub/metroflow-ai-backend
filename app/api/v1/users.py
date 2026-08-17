@@ -1,8 +1,4 @@
-<<<<<<< HEAD
-from fastapi import APIRouter
-from database import supabase
-
-=======
+"""Milestone 1 - User Management Module: profile management, RBAC."""
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -14,7 +10,6 @@ from app.enums.user_role import UserRole
 from app.models.user_profile import UserProfile
 from app.schemas.user_profile import UserProfileResponse, UserProfileUpdate
 from app.simulator.constants import SIMULATED_EMAIL_DOMAIN
->>>>>>> ace7399 (push app/api/v1)
 
 router = APIRouter(
     prefix="/users",
@@ -22,28 +17,6 @@ router = APIRouter(
 )
 
 
-# Get all users
-@router.get("/")
-def get_users():
-
-    response = supabase.table("users").select("*").execute()
-
-    return response.data
-
-
-
-# Create user
-@router.post("/")
-def create_user(user: dict):
-
-    response = supabase.table("users").insert(
-        user
-    ).execute()
-
-    return {
-        "message": "User created successfully",
-        "data": response.data
-    }
 @router.get("/", response_model=list[UserProfileResponse])
 def get_users(
     db: Session = Depends(get_db),
@@ -98,4 +71,3 @@ def update_user(
     db.commit()
     db.refresh(user)
     return user
-    
