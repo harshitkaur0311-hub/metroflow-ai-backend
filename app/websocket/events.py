@@ -1,0 +1,7 @@
+"""Event name constants broadcast over the /ws/monitor channel."""
+
+CROWD_UPDATE = "crowd_update"
+SCHEDULE_UPDATE = "schedule_update"
+DELAY_ALERT = "delay_alert"
+STATION_ALERT = "station_alert"
+TRAIN_POSITION = "train_position"
