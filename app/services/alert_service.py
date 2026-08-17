@@ -1,138 +1,234 @@
-from datetime import datetime, time
+
+from datetime import datetime, timezone
 
 from fastapi import HTTPException
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
-from app.enums.day_type import DayType
-from app.enums.schedule_status import ScheduleStatus
+from app.core.email import send_alert_emails
+from app.core.sms import send_alert_sms
+from app.database.session import SessionLocal
+from app.enums.notification_channel import NotificationChannel
+from app.enums.notification_status import NotificationStatus
+from app.models.alert import Alert
+from app.models.notification_log import NotificationLog
 from app.models.station import Station
-from app.models.train_schedule import TrainSchedule
-from app.schemas.train_schedule import (
-    DelayUpdate,
-    FrequencyAdjustment,
-    TrainScheduleCreate,
-    TrainScheduleUpdate,
-)
+from app.models.user_profile import UserProfile
+from app.schemas.alert import AlertCreate
+from app.simulator.constants import SIMULATED_EMAIL_DOMAIN
 from app.utils.geo import cities_for_state
+from app.websocket.events import STATION_ALERT
+from app.websocket.manager import manager
 
 
-def _scope_to_state(query, state: str | None):
-    """Joins in Station and filters to a state's cities, if requested."""
+def _broadcast_alert(db: Session, alert: Alert, resolved: bool) -> None:
+    """Pushes the alert to every connected operator immediately over
+    /ws/monitor - the sync/thread-safe notify() variant, since this is
+    called from plain `def` routes/services running in FastAPI's
+    threadpool (see app/websocket/manager.py)."""
+    station = db.get(Station, alert.station_id)
+    manager.notify(STATION_ALERT, {
+        "alert_id": alert.id,
+        "station_id": alert.station_id,
+        "station_name": station.station_name if station else None,
+        "alert_type": alert.alert_type.value,
+        "message": alert.message,
+        "available_until": alert.available_until.isoformat() if alert.available_until else None,
+        "is_resolved": resolved,
+        "created_at": alert.created_at.isoformat() if alert.created_at else None,
+    })
+
+
+def list_alerts(
+    db: Session,
+    station_id: int | None = None,
+    active_only: bool = False,
+    state: str | None = None,
+) -> list[Alert]:
+    query = db.query(Alert)
+    if station_id:
+        query = query.filter(Alert.station_id == station_id)
+    if active_only:
+        query = query.filter(Alert.is_resolved.is_(False))
     cities = cities_for_state(state)
-    if not cities:
-        return query
-    return query.join(Station, Station.id == TrainSchedule.station_id).filter(
-        Station.city.in_(cities)
-    )
-
-# Default peak windows used for automatic peak-hour flagging.
-PEAK_WINDOWS = [
-    (time(8, 0), time(11, 0)),
-    (time(17, 0), time(20, 0)),
-]
-
-
-def _is_peak(t: time) -> bool:
-    return any(start <= t <= end for start, end in PEAK_WINDOWS)
-
-
-def list_schedules(
-    db: Session,
-    station_id: int | None = None,
-    train_id: int | None = None,
-    day_type: DayType | None = None,
-    state: str | None = None,
-) -> list[TrainSchedule]:
-    query = db.query(TrainSchedule)
-    if station_id:
-        query = query.filter(TrainSchedule.station_id == station_id)
-    if train_id:
-        query = query.filter(TrainSchedule.train_id == train_id)
-    if day_type:
-        query = query.filter(TrainSchedule.day_type == day_type)
-    query = _scope_to_state(query, state)
-    return query.order_by(TrainSchedule.arrival_time).all()
-
-
-def get_schedule(db: Session, schedule_id: int) -> TrainSchedule:
-    schedule = db.get(TrainSchedule, schedule_id)
-    if not schedule:
-        raise HTTPException(status_code=404, detail="Schedule not found")
-    return schedule
-
-
-def create_schedule(db: Session, payload: TrainScheduleCreate) -> TrainSchedule:
-    data = payload.model_dump()
-    # Auto-detect peak hour unless caller explicitly set it.
-    if not data.get("is_peak_hour"):
-        data["is_peak_hour"] = _is_peak(data["arrival_time"])
-
-    schedule = TrainSchedule(**data)
-    db.add(schedule)
-    db.commit()
-    db.refresh(schedule)
-    return schedule
-
-
-def update_schedule(db: Session, schedule_id: int, payload: TrainScheduleUpdate) -> TrainSchedule:
-    schedule = get_schedule(db, schedule_id)
-    for field, value in payload.model_dump(exclude_unset=True).items():
-        setattr(schedule, field, value)
-    db.commit()
-    db.refresh(schedule)
-    return schedule
-
-
-def handle_delay(db: Session, schedule_id: int, payload: DelayUpdate) -> TrainSchedule:
-    """Delay handling workflow: records delay minutes and flips status."""
-    schedule = get_schedule(db, schedule_id)
-    schedule.delay_minutes = payload.delay_minutes
-    schedule.status = ScheduleStatus.DELAYED if payload.delay_minutes > 0 else ScheduleStatus.ON_TIME
-
-    if payload.delay_minutes > 0:
-        base = datetime.combine(datetime.today(), schedule.arrival_time)
-        delayed = base.replace(
-            minute=(base.minute + payload.delay_minutes) % 60,
-            hour=base.hour + (base.minute + payload.delay_minutes) // 60,
+    if cities:
+        query = query.join(Station, Station.id == Alert.station_id).filter(
+            Station.city.in_(cities)
         )
-        schedule.actual_arrival_time = delayed.time()
+    return query.order_by(Alert.created_at.desc()).all()
 
+
+def create_alert(db: Session, payload: AlertCreate, created_by: str | None = None) -> Alert:
+    # notify_email / notify_sms ARE also persisted as real columns on
+    # the alerts table now (see app/models/alert.py) - included here on
+    # purpose, unlike before, so resolve_alert() can look up which
+    # channels this alert was originally raised on and re-notify the
+    # same audience the same way.
+    alert = Alert(**payload.model_dump(), created_by=created_by)
+    db.add(alert)
     db.commit()
-    db.refresh(schedule)
-    return schedule
+    db.refresh(alert)
+
+    _broadcast_alert(db, alert, resolved=False)
+
+    return alert
 
 
-def adjust_frequency(db: Session, schedule_id: int, payload: FrequencyAdjustment) -> TrainSchedule:
-    """Frequency adjustment workflow (manual override of AI recommendation)."""
-    schedule = get_schedule(db, schedule_id)
-    schedule.frequency_minutes = payload.frequency_minutes
-    if payload.is_peak_hour is not None:
-        schedule.is_peak_hour = payload.is_peak_hour
+def get_alert(db: Session, alert_id: int) -> Alert:
+    alert = db.get(Alert, alert_id)
+    if not alert:
+        raise HTTPException(status_code=404, detail="Alert not found")
+    return alert
+
+
+def resolve_alert(db: Session, alert_id: int) -> Alert:
+    alert = get_alert(db, alert_id)
+    if not alert.is_resolved:
+        alert.is_resolved = True
+        alert.resolved_at = datetime.now(timezone.utc)
+        db.add(alert)
+        db.commit()
+        db.refresh(alert)
+        _broadcast_alert(db, alert, resolved=True)
+    return alert
+
+
+def _log_results(db: Session, alert_id: int, channel: NotificationChannel, results: dict[str, str]) -> None:
+    for recipient, outcome in results.items():
+        is_sent = outcome == "sent"
+        db.add(
+            NotificationLog(
+                alert_id=alert_id,
+                channel=channel,
+                recipient=recipient,
+                status=NotificationStatus.SENT if is_sent else NotificationStatus.FAILED,
+                error_message=None if is_sent else outcome,
+                sent_at=datetime.now(timezone.utc) if is_sent else None,
+            )
+        )
     db.commit()
-    db.refresh(schedule)
-    return schedule
 
 
-def peak_hour_schedules(
-    db: Session,
-    station_id: int | None = None,
-    state: str | None = None,
-) -> list[TrainSchedule]:
-    """Peak-hour optimization view: schedules currently flagged as peak."""
-    query = db.query(TrainSchedule).filter(TrainSchedule.is_peak_hour.is_(True))
-    if station_id:
-        query = query.filter(TrainSchedule.station_id == station_id)
-    query = _scope_to_state(query, state)
-    return query.order_by(TrainSchedule.arrival_time).all()
+def _dispatch(
+    alert_id: int,
+    created_by_id: str | None,
+    notify_email: bool,
+    notify_sms: bool,
+    resolved: bool,
+) -> None:
+
+    if not notify_email and not notify_sms:
+        return
+
+    db = SessionLocal()
+    try:
+        alert = db.get(Alert, alert_id)
+        if not alert:
+            return
+
+        station = db.get(Station, alert.station_id)
+        station_name = station.station_name if station else f"Station #{alert.station_id}"
+
+        available_until = (
+            alert.available_until.isoformat() if alert.available_until else None
+        )
+
+        # Exclude the simulator's virtual passenger pool (see
+        # app/simulator/live_simulator.py - up to
+        # SIMULATOR_PASSENGER_POOL_SIZE fake accounts under
+        # @sim.metroflow.internal, used only to drive the crowd
+        # heatmap). They were previously included in "every active
+        # user", and since that domain isn't a real mailbox, every
+        # alert queued up dozens of doomed sends that came back as
+        # delivery-failure bounces - landing right back in
+        # SMTP_FROM_EMAIL's own inbox, which is what made ONE alert
+        # look like it produced 10 emails. Only real admin/operator/
+        # passenger accounts should ever be notified.
+        active_users = (
+            db.query(UserProfile)
+            .filter(
+                UserProfile.is_active.is_(True),
+                or_(
+                    UserProfile.email.is_(None),
+                    ~UserProfile.email.like(f"%@{SIMULATED_EMAIL_DOMAIN}"),
+                ),
+            )
+            .all()
+        )
+
+        creator = db.get(UserProfile, created_by_id) if created_by_id else None
+
+        if notify_email:
+            emails = {u.email for u in active_users if u.email}
+            if creator and creator.email:
+                emails.add(creator.email)
+            if emails:
+                results = send_alert_emails(
+                    recipients=list(emails),
+                    station_name=station_name,
+                    alert_type=alert.alert_type.value,
+                    message=alert.message,
+                    created_at=alert.created_at.isoformat(),
+                    available_until=available_until,
+                    resolved=resolved,
+                )
+                _log_results(db, alert.id, NotificationChannel.EMAIL, results)
+
+        if notify_sms:
+            # Only users who actually have a phone number on file get
+            # texted - i.e. those who signed up with one, or logged in
+            # via phone/OTP (which requires a phone to exist at all).
+            phones = {u.phone for u in active_users if u.phone}
+            if creator and creator.phone:
+                phones.add(creator.phone)
+            if phones:
+                sms_results = send_alert_sms(
+                    recipients=list(phones),
+                    station_name=station_name,
+                    alert_type=alert.alert_type.value,
+                    message=alert.message,
+                    available_until=available_until,
+                    resolved=resolved,
+                )
+                _log_results(db, alert.id, NotificationChannel.SMS, sms_results)
+    finally:
+        db.close()
 
 
-def delayed_schedules(
-    db: Session,
-    station_id: int | None = None,
-    state: str | None = None,
-) -> list[TrainSchedule]:
-    query = db.query(TrainSchedule).filter(TrainSchedule.status == ScheduleStatus.DELAYED)
-    if station_id:
-        query = query.filter(TrainSchedule.station_id == station_id)
-    query = _scope_to_state(query, state)
-    return query.order_by(TrainSchedule.delay_minutes.desc()).all()
+def dispatch_alert_notifications(
+    alert_id: int,
+    created_by_id: str | None,
+    notify_email: bool,
+    notify_sms: bool,
+) -> None:
+    """Send the original alert email and/or SMS to every active user,
+    plus an explicit copy to whoever raised it, and log one
+    NotificationLog row per (channel, recipient)."""
+    _dispatch(alert_id, created_by_id, notify_email, notify_sms, resolved=False)
+
+
+def dispatch_alert_resolution_notifications(alert_id: int, resolved_by_id: str | None) -> None:
+    """Re-notify the same audience that the alert has been resolved,
+    on the same channel(s) (email/SMS) it was originally raised on -
+    read from the alert's own notify_email/notify_sms columns, so the
+    caller (the /resolve endpoint) doesn't need to repeat them."""
+    db = SessionLocal()
+    try:
+        alert = db.get(Alert, alert_id)
+        if not alert:
+            return
+        notify_email = alert.notify_email
+        notify_sms = alert.notify_sms
+    finally:
+        db.close()
+
+    _dispatch(alert_id, resolved_by_id, notify_email, notify_sms, resolved=True)
+
+
+def list_alert_notifications(db: Session, alert_id: int) -> list[NotificationLog]:
+    return (
+        db.query(NotificationLog)
+        .filter(NotificationLog.alert_id == alert_id)
+        .order_by(NotificationLog.created_at.desc())
+        .all()
+    )

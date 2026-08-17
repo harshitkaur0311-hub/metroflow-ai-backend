@@ -7,6 +7,8 @@ import pandas as pd
 from app.database.init_db import create_tables
 from app.database.session import SessionLocal
 from app.enums.day_type import DayType
+from app.enums.schedule_status import ScheduleStatus
+from app.models.notification_log import NotificationLog
 from app.models.alert import Alert
 from app.models.crowd_log import CrowdLog
 from app.models.journey import Journey
@@ -19,6 +21,7 @@ from app.models.train_location import TrainLocation
 from app.models.train_schedule import TrainSchedule
 
 DEFAULT_DATASET_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "datasets")
+
 LINE_COLORS = ["#1E88E5", "#8E24AA", "#E53935", "#00897B", "#6A1B9A", "#F4511E"]
 NAMED_LINE_COLORS = {
     "yellow": "#EAB308",
@@ -70,9 +73,6 @@ def _clean_stations(stations_raw: pd.DataFrame) -> pd.DataFrame:
                  "Latitude": "latitude", "Longitude": "longitude"}
     ).copy()
 
-    # Basic cleaning: strip whitespace, drop exact duplicates, drop any
-    # row missing a required field (shouldn't happen on the real file,
-    # but keep the script safe against a re-export with gaps).
     for col in ["city", "station_name", "line"]:
         stations[col] = stations[col].astype(str).str.strip()
     stations = stations.drop_duplicates(subset=["city", "station_name"])
@@ -115,6 +115,7 @@ def _clean_train_operations(train_ops: pd.DataFrame, station_id_map: dict) -> pd
     if dropped:
         print(f"train_operations: dropped {dropped} row(s) that didn't match a known station")
     tdf["station_id"] = tdf["station_id"].astype(int)
+
     tdf["delay_reason"] = tdf["delay_reason"].fillna("None")
     tdf["delay_arrival_min"] = tdf["delay_arrival_min"].fillna(0).clip(lower=0)
     tdf["scheduled_arrival"] = pd.to_datetime(tdf["scheduled_arrival"])
@@ -129,6 +130,8 @@ def seed(dataset_dir: str = DEFAULT_DATASET_DIR, reset: bool = False) -> None:
     try:
         if reset:
             print("--reset: clearing existing station/line/train schedule/crowd data...")
+
+            db.query(NotificationLog).delete()
             db.query(Journey).delete()
             db.query(Prediction).delete()
             db.query(TrainLocation).delete()
@@ -171,6 +174,7 @@ def seed(dataset_dir: str = DEFAULT_DATASET_DIR, reset: bool = False) -> None:
 
         db_station_by_ordinal = dict(zip(stations_df["station_id"], station_rows))
 
+        # --- MetroLines: one per (city, line) combo in stations.csv ---
         line_keys = stations_df[["city", "line"]].drop_duplicates().reset_index(drop=True)
         line_by_key: dict[tuple[str, str], MetroLine] = {}
         for i, (_, lrow) in enumerate(line_keys.iterrows()):
@@ -197,6 +201,7 @@ def seed(dataset_dir: str = DEFAULT_DATASET_DIR, reset: bool = False) -> None:
                 station_order=order,
                 distance_from_previous=2.5 if order > 1 else 0,
             ))
+
         train_ids = sorted(set(raw["predictive_maintenance"]["train_id"].astype(str).str.strip()) |
                             set(raw["train_operations"]["train_id"].astype(str).str.strip()))
         train_by_number: dict[str, Train] = {}
@@ -206,6 +211,7 @@ def seed(dataset_dir: str = DEFAULT_DATASET_DIR, reset: bool = False) -> None:
             train_by_number[train_number] = train
         db.flush()
 
+        # --- Real train schedules, from train_operations.csv ---
         ops_df = _clean_train_operations(raw["train_operations"], station_id_map)
         schedule_rows = []
         for _, orow in ops_df.iterrows():
@@ -226,6 +232,12 @@ def seed(dataset_dir: str = DEFAULT_DATASET_DIR, reset: bool = False) -> None:
                 is_peak_hour=bool(is_peak),
                 frequency_minutes=5 if is_peak else 12,
                 delay_minutes=int(round(orow["delay_arrival_min"])),
+  
+                status=(
+                    ScheduleStatus.DELAYED
+                    if int(round(orow["delay_arrival_min"])) > 0
+                    else ScheduleStatus.ON_TIME
+                ),
             ))
         db.add_all(schedule_rows)
 
@@ -234,13 +246,23 @@ def seed(dataset_dir: str = DEFAULT_DATASET_DIR, reset: bool = False) -> None:
         recent_avg = flow_df.groupby("station_id")["passenger_count"].mean()
 
         crowd_rows = []
+        skipped_no_data = 0
         for ordinal, db_station in db_station_by_ordinal.items():
-            avg_count = recent_avg.get(ordinal, db_station.capacity * 0.2)
+            if ordinal not in recent_avg.index:
+                skipped_no_data += 1
+                continue
+            avg_count = recent_avg.loc[ordinal]
             crowd_rows.append(CrowdLog(
                 station_id=db_station.id,
                 current_count=int(min(avg_count, db_station.capacity)),
             ))
         db.add_all(crowd_rows)
+        if skipped_no_data:
+            print(
+                f"crowd seed: {skipped_no_data} station(s) have no passenger_flow.csv "
+                f"data - left with no initial CrowdLog (shows as 0/no-data until the "
+                f"live simulator or real check-ins populate them)."
+            )
 
         db.commit()
         print(
